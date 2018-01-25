@@ -1,4 +1,4 @@
-/* mgod 0.4
+/* mgod 0.5
  * mini gopher server for inetd
  * by Mate Nagy <k-zed@hactar.net>
  * GPL VERSION 2
@@ -20,6 +20,8 @@
 #include <time.h>
 #include <stdarg.h>
 #include <ctype.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 /********************************** newhash */
 
@@ -104,7 +106,12 @@ char DIRLIST[40] = ".gopher";
 char INFCONFIG[40] = ".gopher.rec";
 
 /* name of list of external processors */
+#ifndef EXTPROC
 #define EXTPROC ".search"
+#endif
+
+/* dirlist file extension */
+#define DIRLISTEXT "g"
 
 /* default server settings */
 char * servername = "127.0.0.1";
@@ -112,6 +119,8 @@ int serverport = 70;
 char * rootdir = "/var/gopher";
 char * adminstring = "Frodo Gophermeister <fng@bogus.edu>";
 char * logfile = NULL;
+
+int limit = -1;
 
 /* structure for keeping current path */
 typedef struct node node;
@@ -341,7 +350,7 @@ void infoline(char *str)
 void printentry(char *e)
 {
 	struct stat stbuf;
-	char *ext;
+	char *ext = NULL;
 	char *p, *q;
 	node *no;
 	char *ctype = NULL;
@@ -354,11 +363,7 @@ void printentry(char *e)
 		return;
 	}
 
-	desc = getalias(e);
-	if(desc) {
-		if(desc[0] == 0) return;
-	} else desc = e;
-
+	/* determine menu char */
 	if(S_ISDIR(stbuf.st_mode)) {
 		menuchar = '1';
 	} else if(S_ISREG(stbuf.st_mode)) {
@@ -390,12 +395,15 @@ void printentry(char *e)
 				menuchar = '9'; ctype="application/x-tar";
 			} else if(!strcasecmp(ext, "zip")) {
 				menuchar = '9'; ctype="application/zip";
-
+			} else if(!strcasecmp(ext, "pdf")) {
+				menuchar = '9'; ctype="application/pdf";
 			} else if(!strcasecmp(ext, "html")) {
 				menuchar = 'h'; ctype="text/html";
 			} else if(!strcasecmp(ext, "htm")) {
 				menuchar = 'h'; ctype="text/html";
 
+			} else if(!strcasecmp(ext, DIRLISTEXT)) {
+				menuchar = '1';
 			} else {
 				menuchar = '0';
 				ctype="text/plain";
@@ -410,6 +418,24 @@ void printentry(char *e)
 		return;
 	}
 
+	/* whether we're cutting off the .g ... */
+	int dotg = 0;
+
+	/* determine description */
+	desc = getalias(e);
+	if(desc) {
+		if(desc[0] == 0) return;
+	} else {
+		desc = e;
+
+		/* cut off .g from extension */
+		if(menuchar == '1' && ext && !strcasecmp(ext, "g")) {
+			dotg = 1;
+			ext --;
+			*ext = 0;
+		}
+	}
+
 	if(gopherplus)
 		fputs("+INFO: ", stdout);
 
@@ -422,6 +448,12 @@ void printentry(char *e)
 	}
 
 	printf("%s\t", desc);
+
+	if(dotg) {
+		/* replace dot in the .g */
+		*ext = '.';
+	}
+
 	/* print path */
 	for(no = path; no; no=no->next)
 		printf("%s/", no->text);
@@ -484,7 +516,7 @@ void guessviews(const char *l)
 		case '0': ctype = "text/plain"; break;
 		case '1': ctype = "application/gopher+-menu"; break;
 		case '7':
-				  break;
+			return;
 		case 'h':
 				  ctype = "text/html"; break;
 		default:
@@ -532,9 +564,13 @@ void speccmd(char *cmd)
 		if(sumlen) textsummary = atoi(sumlen);
 		if(textsummary > REQBUF-1) textsummary = REQBUF-1;
 		if(textsummary < 0) textsummary = 0;
+	} else if(!strcmp(spec, "limit")) {
+		/* limit number of directory list entries */
+		char *slimit = strtok(NULL, SPECSEP);
+		if(slimit) limit = atoi(slimit); else limit = 20;
 	} else if(!strcmp(spec, "include")) {
 		/* include .gopher file */
-		
+
 		char *file = strtok(NULL, "");
 		if(!file) {
 			fputs("i!include without arg in config\t\t\t\r\n", stdout);
@@ -678,9 +714,15 @@ void dirlist()
 		}
 
 		if(listrev) {
-			while(n--)
+			while(n--) {
+				if(limit > -1) {
+					if(limit == 0) break;
+					limit --;
+				}
 				printentry(namelist[n]->d_name);
+			}
 		} else {
+			if(limit > -1) n = limit;
 			for(i=0; i<n; i++)
 				printentry(namelist[i]->d_name);
 		}
@@ -982,6 +1024,28 @@ void procreq(char *req)
 
 		if(S_ISREG(stbuf.st_mode)) {
 			/* serve file */
+
+			char *ext;
+			ext = strrchr(req, '.');
+			if(ext) {
+				ext++;
+				if(!strcasecmp(ext, DIRLISTEXT)) {
+					/* serve dirlist file */
+					FILE *fp = fopen(req, "r");
+					if(!fp) {
+						errormsg("can't open file");
+						exit(0);
+					}
+
+					if(gopherplus)
+						fputs("+-2\r\n", stdout);
+
+					readdirlist(fp);
+					fclose(fp);
+					exit(0);
+				}
+			}
+
 			serve(req);
 			exit(0);
 		}
@@ -1063,9 +1127,17 @@ int main(int argc, char *argv[], char *envp[])
 
 	tm = time(NULL);
 	mt = localtime(&tm);
-	logprintf("REQ %04d-%02d-%02d %02d:%02d:%02d '%s'\n",
+
+	struct sockaddr_in addr;
+	socklen_t i = sizeof(addr);
+	int r = getpeername(0, (struct sockaddr *) &addr, &i);
+	char *peer = "unknown";
+	if(r == 0)
+		peer = inet_ntoa(addr.sin_addr);
+
+	logprintf("REQ\t%04d-%02d-%02d %02d:%02d:%02d\t%s\t%s\n",
 			mt->tm_year + 1900, mt->tm_mon + 1, mt->tm_mday,
-			mt->tm_hour, mt->tm_min, mt->tm_sec,
+			mt->tm_hour, mt->tm_min, mt->tm_sec, peer,
 			buf);
 
 	genvp = envp;
