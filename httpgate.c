@@ -1,3 +1,8 @@
+/* httpgate: HTTP gateway for mgod
+ * Copyright (C) 2006-2008 Máté Nagy <mnagy@port70.net>
+ * Available under: GPL (version 3), see file "COPYING"
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -83,7 +88,7 @@ void urlprint(char *s)
 	char *p;
 	for(p = s; *p; p++) {
 		if(isalpha(*p) || isdigit(*p) || *p == '-' || *p == '_'
-				|| *p == '.' || *p == '~')
+				|| *p == '.' || *p == '~' || *p == '/')
 			putchar(*p);
 		else printf("%%%02x", *p);
 	}
@@ -130,11 +135,13 @@ void dirlist_head(char type, char *sel, char *srch, char *body)
 				printf("gopher://%s:%s/%c", home_server, home_port, type);
 			else
 				printf("gopher://%s/%c", home_server, type);
-			htmlprint(sel);
+			urlprint(sel);
+			//htmlprint(sel);
 		} else {
 			htmlprint(urlbase);
 			printf("?%c", type);
-			htmlprint(sel);
+			urlprint(sel);
+			//htmlprint(sel);
 		}
 		printf("</link>");
 		printf("<generator>mgod httpgate</generator>\n");
@@ -149,7 +156,8 @@ void dirlist_head(char type, char *sel, char *srch, char *body)
 			printf("<h1>gopher://%s:%s/%c", home_server, home_port, type);
 		else
 			printf("<h1>gopher://%s/%c", home_server, type);
-		htmlprint(sel);
+		urlprint(sel);
+		//htmlprint(sel);
 
 		if(srch) {
 			printf(" (");
@@ -168,7 +176,7 @@ void dirlist_foot(char type, char *sel, char *srch)
 		printf("</channel></rss>");
 	} else {
 		printf("</pre>\n<hr>");
-		printf("<a href=\"gopher://hactar.net/1mgod\">mgod httpgate</a>");
+		printf("<a href=\"gopher://port70.net/1mgod\">mgod httpgate</a>");
 		printf("</body></html>");
 	}
 }
@@ -221,17 +229,20 @@ void row_homelink(char type, char *desc, char *sel)
 				printf("gopher://%s:%s/%c", home_server, home_port, type);
 			else
 				printf("gopher://%s/%c", home_server, type);
-			htmlprint(sel);
+			urlprint(sel);
+			//htmlprint(sel);
 		} else {
 			htmlprint(urlbase);
 			printf("?%c", type);
-			htmlprint(sel);
+			urlprint(sel);
+			//htmlprint(sel);
 		}
 		printf("</link></item>");
 	} else {
 		typeprefix(type);
 		printf("<a href=\"?%c", type);
-		htmlprint(sel);
+		urlprint(sel);
+		//htmlprint(sel);
 		printf("\">");
 		htmlprint(desc);
 		printf("</a>\n");
@@ -252,7 +263,8 @@ void row_extlink(char type, char *desc, char *sel, char *host, char *port)
 			htmlprint(port);
 		}
 		printf("/%c", type);
-		htmlprint(sel);
+		urlprint(sel);
+		//htmlprint(sel);
 		printf("</link></item>");
 	} else {
 		typeprefix(type);
@@ -263,7 +275,8 @@ void row_extlink(char type, char *desc, char *sel, char *host, char *port)
 			htmlprint(port);
 		}
 		printf("/%c", type);
-		htmlprint(sel);
+		urlprint(sel);
+//		htmlprint(sel);
 		printf("\">");
 		htmlprint(desc);
 		printf("</a>\n");
@@ -277,10 +290,12 @@ void row_url(char type, char *desc, char *url)
 		printf("<item><title>");
 		htmlprint(desc);
 		printf("</title><link>");
+		//urlprint(url);
 		htmlprint(url);
 		printf("</link></item>");
 	} else {
 		printf("<b>-&gt;</b> <a href=\"");
+	//	urlprint(url);
 		htmlprint(url);
 		printf("\">");
 		htmlprint(desc);
@@ -309,6 +324,11 @@ void do_dirlist(char type, char *sel)
 	while(fgets(line, 512, fp)) {
 		char type = line[0];
 		if(!type || type == '\n') continue;
+
+		char *eol = strchr(line, '\r');
+		if(eol) *eol = 0;
+		eol = strchr(line, '\n');
+		if(eol) *eol = 0;
 
 		char *p = line + 1;
 

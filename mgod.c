@@ -1,7 +1,6 @@
-/* mgod 0.5
- * mini gopher server for inetd
- * by Mate Nagy <k-zed@hactar.net>
- * GPL VERSION 2
+/* mgod: mini gopher server for inetd
+ * Copyright (C) 2006-2008 Máté Nagy <mnagy@port70.net>
+ * Available under: GPL (version 3), see file "COPYING"
  */
 
 #define _GNU_SOURCE
@@ -22,6 +21,46 @@
 #include <ctype.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+
+
+
+/* size of maximum request string and config file line */
+#define REQBUF 512
+/* buffer size for file serving */
+#define SERVBUF 2048
+
+/* name of directory listing config file */
+char DIRLIST[40] = ".gopher";
+
+/* name of inheriting config file */
+char INFCONFIG[40] = ".gopher.rec";
+
+/* dirlist file extension */
+#define DIRLISTEXT "g"
+
+/* default server settings */
+char * servername = "127.0.0.1";
+int serverport = 70;
+char * rootdir = "/var/gopher";
+char * logfile = NULL;
+
+/* file types */
+char *filetypes[] = {
+	/* images */
+	"I", ".jpg.jpeg.jpe.png.bmp.",
+	"g", ".gif.",
+	/* binary formats */
+	"9", ".gz.tgz.tar.zip.bz2.rar.pdf.mid.xm.mod.",
+	";", ".avi.mp4.mpg.",
+	"a", ".wav.mp3.au.",
+	/* html */
+	"h", ".htm.html.swf.",
+
+	/* directory list */
+	"1", "." DIRLISTEXT ".",
+
+	NULL
+};
 
 /********************************** newhash */
 
@@ -91,36 +130,57 @@ u4 hash(k, length, initval)
 
 /***********************************************************************/
 
-/* size of maximum request string and config file line */
-#define REQBUF 512
-/* buffer size for file serving */
-#define SERVBUF 2048
 
-/* maximum number of arguments (+1) for external processor */
-#define MAXPROCARG 16
-
-/* name of directory listing config file */
-char DIRLIST[40] = ".gopher";
-
-/* name of inheriting config file */
-char INFCONFIG[40] = ".gopher.rec";
-
-/* name of list of external processors */
-#ifndef EXTPROC
-#define EXTPROC ".search"
-#endif
-
-/* dirlist file extension */
-#define DIRLISTEXT "g"
-
-/* default server settings */
-char * servername = "127.0.0.1";
-int serverport = 70;
-char * rootdir = "/var/gopher";
-char * adminstring = "Frodo Gophermeister <fng@bogus.edu>";
-char * logfile = NULL;
-
+/* maximum number of directory list entries to print */
 int limit = -1;
+
+/* the environment received in main() */
+char **genvp;
+
+/* output a single line, then \r\n EOL */
+void outln(const char *str)
+{
+	fputs(str, stdout);
+	fputs("\r\n", stdout);
+}
+
+/* print error message */
+void errormsg(const char *e)
+{
+	printf("3%s\tfake\t(NULL)\t0\r\n.\r\n", e);
+}
+
+/* print info line */
+void infoline(char *str)
+{
+	putchar('i');
+	fputs(str, stdout);
+	outln("\tfake\t(NULL)\t0");
+}
+
+/* append to log */
+void logprintf(const char *format, ...)
+{
+	FILE *fp;
+	va_list ap;
+
+	if(!logfile) return;
+
+	fp = fopen(logfile, "a");
+	if(!fp) {
+		perror("can't open log file");
+		return;
+	}
+
+	va_start(ap, format);
+	vfprintf(fp, format, ap);
+	va_end(ap);
+
+	fclose(fp);
+}
+
+/********************************** path */
+
 
 /* structure for keeping current path */
 typedef struct node node;
@@ -129,8 +189,10 @@ struct node {
 	node *next;
 };
 
+/* current path */
 node *path = NULL;
 
+/* make a path node */
 node *mkpn(const char *tx) {
 	node *n = (node *) malloc(sizeof(node));
 	if(!n) exit(1);
@@ -138,6 +200,64 @@ node *mkpn(const char *tx) {
 	n->next = NULL;
 	return n;
 }
+
+
+/********************************** directory processors */
+
+
+
+/* structure for keeping directory processors */
+typedef struct dirproc dirproc;
+struct dirproc {
+	char *name;
+	char *cmd;
+	int raw;
+	dirproc *next;
+};
+
+/* directory processors */
+dirproc *dirprocs = NULL;
+
+/* record a directory processor */
+void adddirproc(char *name, char *cmd)
+{
+	dirproc *n = (dirproc *) malloc(sizeof(dirproc));
+	n->name = strdup(name);
+	n->cmd = strdup(cmd);
+	n->next = dirprocs;
+	n->raw = 0;
+	dirprocs = n;
+}
+
+/* look up dirproc command by name */
+dirproc *getdirproc(char *name)
+{
+	dirproc *n;
+	for(n = dirprocs; n; n=n->next) {
+		if(!strcmp(n->name, name)) return n;
+	}
+	return NULL;
+}
+
+/* empty the list of dirprocs */
+void cleardirprocs()
+{
+	dirproc *n, *m = NULL;
+	for(n = dirprocs; n; n = n->next) {
+		free(m);
+		free(n->name);
+		free(n->cmd);
+		m = n;
+	}
+	free(m);
+	dirprocs = NULL;
+}
+
+
+
+/********************************** file name aliases */
+
+
 
 /* structure for keeping file name aliases */
 typedef struct alias alias;
@@ -252,29 +372,7 @@ char * getalias(const char *name) {
 	}
 }
 
-/* environment */
-char **genvp;
-
-/* append to log */
-void logprintf(const char *format, ...)
-{
-	FILE *fp;
-	va_list ap;
-
-	if(!logfile) return;
-
-	fp = fopen(logfile, "a");
-	if(!fp) {
-		perror("can't open log file");
-		return;
-	}
-
-	va_start(ap, format);
-	vfprintf(fp, format, ap);
-	va_end(ap);
-
-	fclose(fp);
-}
+/***********************************************************************/
 
 /* helper functions for directory listing */
 int dirfilter(const struct dirent *a)
@@ -318,48 +416,34 @@ int dirsort(const struct dirent **a, const struct dirent **b)
 	}
 }
 
-/* gopher+ mode */
-int gopherplus = 0;
-/* print item info instead of file serve */
-int iteminfo = 0;
-/* process external processor's output */
-int managedextern = 0;
-
-/* print error message */
-void errormsg(const char *e)
-{
-	if(gopherplus)
-		printf("--2\r\n%s\r\n", e);
-	else
-		printf("3%s\t\t\t\r\n.\r\n", e);
-}
-
-/* print info line */
-void infoline(char *str)
-{
-	if(gopherplus)
-		fputs("+INFO: ", stdout);
-	putchar('i');
-	fputs(str, stdout);
-	fputs("\t-\t-\t-\r\n", stdout);
-	if(gopherplus)
-		printf("+ADMIN:\r\n Admin: %s\r\n", adminstring);
-}
-
 /* print directory entry */
 void printentry(char *e)
 {
 	struct stat stbuf;
 	char *ext = NULL;
-	char *p, *q;
 	node *no;
-	char *ctype = NULL;
 	char menuchar;
 	char *desc;
 	struct tm *mt;
 
-	if(stat(e, &stbuf)) {
+	char *fil = e; // file system name
+	int absolute = 0;
+
+	if(e[0] == '/') {
+		/* when given an absolute path, prepend server root... */
+		fil = (char *) alloca(strlen(rootdir) + strlen(e));
+		sprintf(fil, "%s%s", rootdir, e);
+		absolute = 1;
+		e ++;
+	}
+
+	if(stat(fil, &stbuf)) {
 		errormsg("can't stat file");
+		return;
+	}
+
+	if(!(stbuf.st_mode & S_IROTH)) {
+		/* not readable by all; skip */
 		return;
 	}
 
@@ -370,48 +454,28 @@ void printentry(char *e)
 
 		ext = strrchr(e, '.');
 		if(ext) {
-			ext++;
+			char **ft = filetypes;
+			char extwdot[8];
 
-			/* images */
-			if(!strcasecmp(ext, "gif")) {
-				menuchar = 'g'; ctype="image/gif";
-			} else if(!strcasecmp(ext, "jpg")) {
-				menuchar = 'I'; ctype="image/jpeg";
-			} else if(!strcasecmp(ext, "jpeg")) {
-				menuchar = 'I'; ctype="image/jpeg";
-			} else if(!strcasecmp(ext, "jpe")) {
-				menuchar = 'I'; ctype="image/jpeg";
-			} else if(!strcasecmp(ext, "png")) {
-				menuchar = 'I'; ctype="image/png";
-			} else if(!strcasecmp(ext, "bmp")) {
-				menuchar = 'I'; ctype="image/x-ms-bmp";
-
-			/* binary formats */
-			} else if(!strcasecmp(ext, "gz")) {
-				menuchar = '9'; ctype="application/x-gtar";
-			} else if(!strcasecmp(ext, "tgz")) {
-				menuchar = '9'; ctype="application/x-gtar";
-			} else if(!strcasecmp(ext, "tar")) {
-				menuchar = '9'; ctype="application/x-tar";
-			} else if(!strcasecmp(ext, "zip")) {
-				menuchar = '9'; ctype="application/zip";
-			} else if(!strcasecmp(ext, "pdf")) {
-				menuchar = '9'; ctype="application/pdf";
-			} else if(!strcasecmp(ext, "html")) {
-				menuchar = 'h'; ctype="text/html";
-			} else if(!strcasecmp(ext, "htm")) {
-				menuchar = 'h'; ctype="text/html";
-
-			} else if(!strcasecmp(ext, DIRLISTEXT)) {
-				menuchar = '1';
-			} else {
+			if(strlen(ext) > 7) {
 				menuchar = '0';
-				ctype="text/plain";
+			} else {
+				strcpy(extwdot, ext);
+				strcat(extwdot, ".");
+				for(; *ft; ft ++) {
+					char mch = *ft[0]; ft++;
+					if(strcasestr(*ft, extwdot)) {
+						menuchar = mch;
+						break;
+					}
+				}
+
+				if(!(*ft)) menuchar = '0';
 			}
 
+			ext ++; // skip dot
 		} else {
 			menuchar = '0';
-			ctype="text/plain";
 		}
 
 	} else {
@@ -424,20 +488,17 @@ void printentry(char *e)
 	/* determine description */
 	desc = getalias(e);
 	if(desc) {
-		if(desc[0] == 0) return;
+		if(desc[0] == 0) return; /* desc aliased to empty; skip */
 	} else {
 		desc = e;
 
 		/* cut off .g from extension */
-		if(menuchar == '1' && ext && !strcasecmp(ext, "g")) {
+		if(menuchar == '1' && ext && !strcasecmp(ext, DIRLISTEXT)) {
 			dotg = 1;
-			ext --;
+			ext -= strlen(DIRLISTEXT);
 			*ext = 0;
 		}
 	}
-
-	if(gopherplus)
-		fputs("+INFO: ", stdout);
 
 	putchar(menuchar);
 
@@ -454,34 +515,19 @@ void printentry(char *e)
 		*ext = '.';
 	}
 
-	/* print path */
-	for(no = path; no; no=no->next)
-		printf("%s/", no->text);
-
-	printf("%s\t%s\t%d\t+\r\n", e, servername, serverport);
-
-	if(gopherplus) {
-		/* print admin block */
-		fputs("+ADMIN:\r\n", stdout);
-		printf(" Admin: %s\r\n", adminstring);
-		p = ctime(&stbuf.st_mtime);
-		q = strchr(p, '\n');
-		if(q) *q = 0;
-		
-		printf(" Mod-Date: %s <%04d%02d%02d%02d%02d%02d>\r\n",
-				p, mt->tm_year + 1900, mt->tm_mon + 1, mt->tm_mday,
-				mt->tm_hour, mt->tm_min, mt->tm_sec);
-
-		if(ctype) {
-			printf("+VIEWS:\r\n %s: <%ldK>\r\n", ctype, stbuf.st_size / 1024);
-		}
+	if(!absolute) {
+		/* print path */
+		for(no = path; no; no=no->next)
+			printf("%s/", no->text);
 	}
+
+	printf("%s\t%s\t%d\r\n", e, servername, serverport);
 
 	if(textsummary > 0 && menuchar == '0') {
 		/* output text summary for plain text file */
 
 		char buf[REQBUF];
-		FILE *fp = fopen(e, "r");
+		FILE *fp = fopen(fil, "r");
 		if(fp) {
 			int i = 0;
 			int spccnt = 0;
@@ -506,26 +552,8 @@ void printentry(char *e)
 
 }
 
-/* guess a VIEWS block from a link */
-void guessviews(const char *l)
-{
-	char *ctype = NULL;
-	switch(l[0]) {
-		case 'g': ctype = "image/gif"; break;
-		case 'I': ctype = "image/png"; break;
-		case '0': ctype = "text/plain"; break;
-		case '1': ctype = "application/gopher+-menu"; break;
-		case '7':
-			return;
-		case 'h':
-				  ctype = "text/html"; break;
-		default:
-				  ctype = "application/octet-stream";
-	}
 
-	printf("+VIEWS:\r\n %s: <0K>\r\n", ctype);
-}
-
+/* special command token separator */
 #define SPECSEP " \t"
 
 void readdirlist(FILE *fp);
@@ -536,7 +564,7 @@ void speccmd(char *cmd)
 {
 	char *spec = strtok(cmd, SPECSEP);
 	if(!spec) {
-		fputs("iEmpty ! command in config\t\t\t\r\n", stdout);
+		errormsg("Empty ! command in config");
 		return;
 	}
 
@@ -573,12 +601,12 @@ void speccmd(char *cmd)
 
 		char *file = strtok(NULL, "");
 		if(!file) {
-			fputs("i!include without arg in config\t\t\t\r\n", stdout);
+			errormsg("!include without arg in config");
 			return;
 		}
 		FILE *fp = fopen(file, "r");
 		if(!fp) {
-			fputs("ican't open !include file\t\t\t\r\n", stdout);
+			errormsg("can't open !include file");
 			return;
 		}
 		readdirlist(fp);
@@ -588,12 +616,27 @@ void speccmd(char *cmd)
 
 		char *ext = strtok(NULL, "");
 		if(!ext) {
-			fputs("i!proc without arg in config\t\t\t\r\n", stdout);
+			errormsg("!proc without arg in config");
 			return;
 		}
 		runextern(ext);
+	} else if(!strcmp(spec, "dirproc") || !strcmp(spec, "dirproc-raw")) {
+		/* register directory processor */
+		char *name = strtok(NULL, SPECSEP);
+		if(!name) {
+			errormsg("!dirproc without name arg");
+			return;
+		}
+		char *cmd = strtok(NULL, "");
+		if(!cmd) {
+			errormsg("!dirproc without cmd arg");
+			return;
+		}
+		adddirproc(name, cmd);
+		if(!strcmp(spec, "dirproc-raw"))
+			dirprocs->raw = 1;
 	} else {
-		fputs("iInvalid !command in config\t\t\t\r\n", stdout);
+		errormsg("Invalid !command in config");
 	}
 }
 
@@ -614,47 +657,26 @@ void readdirlist(FILE *fp)
 				{ *p = 0; break; }
 
 		switch(buf[0]) {
-			/* verbatim full link */
+			/* verbatim */
 			case ':':
-				if(gopherplus)
-					fputs("+INFO: ", stdout);
-				fputs(buf+1, stdout);
-				fputs("\t+\r\n", stdout);
-				if(gopherplus) {
-					printf("+ADMIN:\r\n Admin: %s\r\n", adminstring);
-					guessviews(buf+1);
-				}
+				outln(buf+1);
 				break;
 
 			/* verbatim local link */
 			case '.':
-				if(gopherplus)
-					fputs("+INFO: ", stdout);
 				fputs(buf+1, stdout);
-				printf("\t%s\t%d\t+\r\n", servername, serverport);
-				if(gopherplus) {
-					printf("+ADMIN:\r\n Admin: %s\r\n", adminstring);
-					guessviews(buf+1);
-				}
+				printf("\t%s\t%d\r\n", servername, serverport);
 				break;
 
 			/* local link, with path automatically prepended */
 			case '`':
-				if(gopherplus)
-					fputs("+INFO: ", stdout);
-
 				p = strchr(buf+1, '\t');
 				if(p) {
 					*p = 0;
 					printf("%s\t", buf+1);
 					for(no = path; no; no=no->next)
 						printf("%s/", no->text);
-					printf("%s\t%s\t%d\t+\r\n", p+1, servername, serverport);
-				}
-
-				if(gopherplus) {
-					printf("+ADMIN:\r\n Admin: %s\r\n", adminstring);
-					guessviews(buf+1);
+					printf("%s\t%s\t%d\r\n", p+1, servername, serverport);
 				}
 				break;
 
@@ -683,7 +705,54 @@ void readdirlist(FILE *fp)
 
 			/* info line */
 			default:
-				infoline(buf);
+			/* no special beginning characters.
+			 * Let's try to find tabs */
+			{
+				char *info = buf;
+				char *sel = strchr(buf, '\t');
+				char *serv = NULL;
+				char *port = NULL;
+				if(!sel) {
+					/* just an infoline after all */
+					infoline(buf);
+				} else {
+					/* has tabs; try to interpret somewhat similarly
+					 * to bucktooth (fill in missing fields) */
+
+					*sel++ = 0;
+					serv = strchr(sel, '\t');
+					if(serv) {
+						*serv++ = 0;
+						port = strchr(serv, '\t');
+						if(port) *port++ = 0;
+					}
+
+					if(!info[0]) {
+						/* missing info field */
+						if(!serv) {
+							/* if no serv specified, just do a printentry */
+							if(!strncmp(sel, "URL:", 4)) {
+								/* .. unless it begins with URL: */
+								printf("h%s\t%s\t%s\t%d\r\n", sel+4, sel, servername, serverport);
+							} else printentry(sel);
+						} else {
+							errormsg("known selector, but no info field on nonlocal serv");
+						}
+					} else {
+						/* info is specified. */
+						printf("%s\t", info);
+
+						if(!serv && sel[0] != '/' && strncmp(sel, "URL:", 4)) {
+							/* selector is relative and serv is local, print path */
+							for(no = path; no; no=no->next)
+								printf("%s/", no->text);
+						}
+						if(sel[0] == '/') sel ++;
+						printf("%s\t%s\t%d\r\n", sel, serv ? serv : servername,
+							port ? atoi(port) : (serv ? 70 : serverport));
+					}
+				}
+			}
 		}
 	}
 }
@@ -694,9 +763,6 @@ void dirlist()
 	FILE *fp;
 	int n, i;
 	struct dirent **namelist;
-
-	if(gopherplus)
-		fputs("+-2\r\n", stdout);
 
 	/* process configuration file */
 	fp = fopen(DIRLIST, "r");
@@ -737,19 +803,15 @@ void serve(char *fn)
 	char buf[SERVBUF];
 	struct stat stbuf;
 
-	if(iteminfo) {
-		fputs("+-2\n", stdout);
-		printentry(fn);
-		return;
-	}
-
 	if(stat(fn, &stbuf)) {
 		errormsg("can't stat file");
 		exit(0);
 	}
 
-	if(gopherplus) {
-		printf("+%ld\r\n", stbuf.st_size);
+	if(!(stbuf.st_mode & S_IROTH)) {
+		/* not everyone has read access */
+		errormsg("access denied");
+		exit(0);
 	}
 
 	fp = fopen(fn, "rb");
@@ -777,148 +839,77 @@ void runextern(char *cmd)
 	pclose(fp);
 }
 
-/* try to run a search processor */
-void runsearch(char *name, char *search)
+/* try to run/include a directory processor */
+void rundirproc(dirproc *d, char *path)
 {
-	FILE *fp;
-	FILE *fp2;
-	char buf[REQBUF];
-	char *p, *q;
-	char *args[MAXPROCARG];
-	char *exe;
-	int argc=0;
-	int status;
-	int pfd[2];
-	pid_t cpid;
+	setenv("QUERY", path, 1);
+	if(d->raw) {
+		char *args[4] = { "sh", "-c", d->cmd, NULL };
+		execv("/bin/sh", args);
+		errormsg("execv failed");
+		exit(0);
+	} else {
+		runextern(d->cmd);
+	}
+}
 
-	fp = fopen(EXTPROC, "r");
-	if(!fp) {
-		errormsg("extern definitions not found");
+/* print a stub for redirecting gopher+ clients to the non-gopher+ menu */
+void gopherplus_stub(char *req)
+{
+	/* this is a direct copy of the gopher.floodgap.com server notice */
+	outln("+-1");
+	printf("+INFO: 1Main menu (non-gopher+)\t\t%s\t%d\r\n", servername, serverport);
+	outln("+ADMIN:");
+	outln(" Admin: Server Administrator");
+	outln(" Server:");
+	outln("+VIEWS:");
+	outln(" application/gopher+-menu: <512b>");
+	outln("+ABSTRACT:");
+	outln(" This gopher supports standard gopher access only. Use this");
+	outln(" kludge to disable gopher+ client requests by your client.");
+}
+
+/* change to a directory; fail if directory is not readable by all */
+void chdir_chk(const char *dir)
+{
+	struct stat stbuf;
+	if(stat(dir, &stbuf)) {
+		errormsg("failed to stat directory");
 		exit(0);
 	}
 
-	/* read .search */
-	while(!feof(fp)) {
-		if(!fgets(buf, REQBUF, fp)) break;
-
-		for(p=buf; *p; p++)
-			if(*p == '\r' || *p == '\n')
-				{ *p = 0; break; }
-
-		p = buf;
-		if(!(q = strchr(p, '\t'))) continue;
-		*q = 0;
-		if(strcmp(p, name)) continue;
-
-		/* found entry, built argument list */
-
-		p=q+1;
-
-		exe = p;
-		args[0] = exe; argc++;
-		while((q = strchr(p, '\t'))) {
-			p = q+1;
-			*q=0;
-
-			args[argc] = p; argc++;
-			if(argc == MAXPROCARG - 2) {
-				errormsg("too many arguments for extern");
-				exit(0);
-			}
-		}
-
-		args[argc] = search; argc++;
-
-		if(gopherplus && !managedextern) {
-			args[argc] = "$"; argc++;
-		}
-
-		args[argc] = NULL;
-
-
-		/* invoke processor */
-
-		if(managedextern) {
-			/* execute managed processor */
-
-			if(pipe(pfd) == -1) {
-				perror("pipe");
-				exit(1);
-			}
-
-			cpid = fork();
-			if(cpid == -1) {
-				perror("fork");
-				exit(1);
-			}
-
-			if(cpid == 0) {
-				/* child */
-				close(pfd[0]); /* close unused read end */
-				close(1); /* close stdout */
-				dup2(pfd[1], 1); /* assign writing end to stdout */
-				execve(exe, args, genvp);
-				errormsg("error running extern");
-				exit(1);
-			} else {
-				/* parent */
-				close(pfd[1]); /* close unused write end */
-
-				if(gopherplus)
-					fputs("+-2\r\n", stdout);
-
-				fp2 = fdopen(pfd[0], "r");
-				readdirlist(fp2);
-				fclose(fp2);
-
-				waitpid(cpid, &status, WNOHANG);
-				if(!WIFEXITED(status)) {
-					kill(cpid, 9); /* kthxbye */
-				}
-			}
-
-			exit(0);
-
-		} else {
-			/* unmanaged */
-			execve(exe, args, genvp);
-			errormsg("error running extern");
-			exit(1);
-		}
+	if(!(stbuf.st_mode & S_IROTH)) {
+		errormsg("access to directory denied");
+		exit(0);
 	}
 
-	fclose(fp);
-	errormsg("extern key not found");
-	exit(0);
+	if(chdir(dir)) {
+		errormsg("chdir failed");
+		exit(0);
+	}
 }
 
 /* process request */
-void procreq(char *req)
+void procreq(char *request)
 {
 	char *pathel;
-	char *search = NULL;
-	char *sep, *p;
+	char *sep;
 	struct stat stbuf;
 	node *no = NULL;
 
-	if((sep = strchr(req, '\t'))) {
-		/* check for search string / gopher+ flags */
-		search = sep+1;
-		*sep = 0;
+	char *req = strsep(&request, "\t");
+	char *search = strsep(&request, "\t");
+	if(search) {
+		/* search string is specified */
+		if(!strcmp(search, "$")) {
+			/* gopher+ menu attempted, print gopher+ redirect */
+			gopherplus_stub(req);
+			exit(0);
+		}
 
-		p = strchr(search, '\t');
-		if(p) {
-			*p = 0;
-			p++;
-		} else p = search;
-
-		if(!strcmp(p, "!")) {
-			iteminfo = 1;
-			gopherplus = 1;
-		} else if(!strcmp(p, "$"))
-			gopherplus = 1;
-		else if(p[0] == '+')
-			gopherplus = 1;
+		/* set search string in environment
+		 * (for the possibly run external search processor */
+		setenv("SEARCH", search, 1);
 	}
 
 	if(!strncmp(req, "URL:", 4)) {
@@ -932,6 +923,7 @@ void procreq(char *req)
 		exit(0);
 	}
 
+	/* read .gopher.rec in server root if exists */
 	if(!stat(INFCONFIG, &stbuf)) {
 		FILE *fp = fopen(INFCONFIG, "r");
 		if(fp) {
@@ -940,11 +932,22 @@ void procreq(char *req)
 		}
 	}
 
-	/* follow path */
+	/* follow request path */
 	while((sep = strchr(req, '/'))) {
 		pathel = req;
 		*sep = 0;
 		req = sep + 1;
+
+		/* check for directory processors */
+		{
+			dirproc *d = getdirproc(pathel);
+			if(d) {
+				*sep = '/';
+				rundirproc(d, pathel);
+				exit(0);
+			}
+		}
+		cleardirprocs();
 
 		if(!strcmp(pathel, "..")) {
 			errormsg("invalid path");
@@ -955,10 +958,7 @@ void procreq(char *req)
 		if(pathel[0] == 0)
 			continue;
 
-		if(chdir(pathel)) {
-			errormsg("file not found or chdir failed");
-			exit(0);
-		}
+		chdir_chk(pathel);
 
 		/* record path */
 		if(no) {
@@ -980,15 +980,13 @@ void procreq(char *req)
 
 	/* final path element */
 	if(req[0]) {
-		if(req[0] == '!' || req[0] == '@') {
-			/* external processor */
-			if(req[0] == '@') managedextern = 1;
-			char *p = strchr(req + 1, '?');
-			if(p) {
-				*p = 0;
-				search = p + 1;
+		{
+			/* check for directory processors */
+			dirproc *d = getdirproc(req);
+			if(d) {
+				rundirproc(d, req);
+				exit(0);
 			}
-			runsearch(req+1, search);
 		}
 
 		if(stat(req, &stbuf)) {
@@ -996,19 +994,9 @@ void procreq(char *req)
 			exit(0);
 		}
 
-		if(iteminfo) {
-			/* instead of serving, print info */
-			fputs("+-2\n", stdout);
-			printentry(req);
-			exit(0);
-		}
-
 		if(S_ISDIR(stbuf.st_mode)) {
 			/* directory */
-			if(chdir(req)) {
-				errormsg("chdir failed");
-				exit(0);
-			}
+			chdir_chk(req);
 
 			/* record path */
 			if(no) {
@@ -1025,6 +1013,11 @@ void procreq(char *req)
 		if(S_ISREG(stbuf.st_mode)) {
 			/* serve file */
 
+			if(!strcmp(req, DIRLIST) || !strcmp(req, INFCONFIG)) {
+				errormsg("access denied");
+				exit(0);
+			}
+
 			char *ext;
 			ext = strrchr(req, '.');
 			if(ext) {
@@ -1036,9 +1029,6 @@ void procreq(char *req)
 						errormsg("can't open file");
 						exit(0);
 					}
-
-					if(gopherplus)
-						fputs("+-2\r\n", stdout);
 
 					readdirlist(fp);
 					fclose(fp);
@@ -1066,13 +1056,11 @@ int main(int argc, char *argv[], char *envp[])
 	time_t tm;
 	struct tm *mt;
 	char *sel = NULL;
+	char *peer = NULL;
 
 	/* process arguments */
-	while((o = getopt(argc, argv, "n:p:r:a:l:b:hs:")) != -1) {
+	while((o = getopt(argc, argv, "n:p:r:l:b:hs:P:")) != -1) {
 		switch(o) {
-			case 'a':
-				adminstring = strdup(optarg);
-				break;
 			case 'n':
 				servername = strdup(optarg);
 				break;
@@ -1093,16 +1081,19 @@ int main(int argc, char *argv[], char *envp[])
 			case 's':
 				sel = optarg;
 				break;
+			case 'P':
+				peer = optarg;
+				break;
 			case '?':
 			case 'h':
 				fprintf(stderr, "mgod mini gopher server\n\n");
 				fprintf(stderr, "-n name: set server name (default 127.0.0.1)\n");
 				fprintf(stderr, "-p port: set server port (default 70)\n");
 				fprintf(stderr, "-r dir: set root dir (default /var/gopher)\n");
-				fprintf(stderr, "-a str: set admin string\n");
 				fprintf(stderr, "-l name: enable logging\n");
 				fprintf(stderr, "-b name: dirlist basename (default .gopher)\n");
 				fprintf(stderr, "-s sel: use this selector instead of reading from stdin\n");
+				fprintf(stderr, "-P peer: specify peer name for incoming connection (for logging)\n");
 				exit(1);
 		}
 	}
@@ -1128,12 +1119,18 @@ int main(int argc, char *argv[], char *envp[])
 	tm = time(NULL);
 	mt = localtime(&tm);
 
-	struct sockaddr_in addr;
-	socklen_t i = sizeof(addr);
-	int r = getpeername(0, (struct sockaddr *) &addr, &i);
-	char *peer = "unknown";
-	if(r == 0)
-		peer = inet_ntoa(addr.sin_addr);
+	if(!peer) {
+		/* if peer not specified, try to retrieve info from stdin socket */
+		struct sockaddr_in addr;
+		socklen_t i = sizeof(addr);
+		int r = getpeername(0, (struct sockaddr *) &addr, &i);
+		if(r == 0)
+			peer = inet_ntoa(addr.sin_addr);
+		else
+			peer = "unknown";
+	}
+
+	setenv("PEER", peer, 1);
 
 	logprintf("REQ\t%04d-%02d-%02d %02d:%02d:%02d\t%s\t%s\n",
 			mt->tm_year + 1900, mt->tm_mon + 1, mt->tm_mday,

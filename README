@@ -1,10 +1,30 @@
-mgod 0.5
-a mini gopher server for inetd
+mgod copyright (C) 2006-2008 Máté Nagy <mnagy@port70.net>
+This software is available under the GNU General Public License (Version 3)
+(a copy of which can be found in the file COPYING).
+
+
+mgod: a mini gopher server for inetd
 
 Mgod can serve a directory structure, taking extra data from hidden files in
 each directory (called .gopher).  It can invoke external scripts or
 executables for search string processing.
-Gopher+ is supported.
+
+Gopher+ used to be supported, but support was eventually removed.
+Now, only the "$" selector argument is supported (for printing a redirect
+menu to the non-gopher+ content, like the gopher.floodgap.com server does),
+to accomodate clients that query the root menu in gopher+ mode straight
+away (UMN gopher client).
+
+
+CHANGELOG
+
+1.0:
+  - license changed to GPL v3
+  - Gopher+ support removed
+  - Removed original support for search processors (now only dirproc-style
+    support remains)
+  - Check for access permissions (don't serve files/dirs not readable by all)
+  - Better file type classification (by a table defined at the head of the .c)
 
 
 INSTALLING
@@ -31,21 +51,32 @@ ARGUMENTS
 -r <rootdir>
     Set the root directory of your content (default /var/gopher).
 
--a <adminstring>
-    Set administrator string.
-    Should be like "Name <email>"
-
 -l <logfile>
     Enable logging to a file.
 
 -b <basename>
     Use filename instead of ".gopher" (appending .rec for ".gopher.rec")
 
+-P <peer>
+    Specify connection peer IP/name (for logging). If not specified, mgod will
+    try to examine the stdin socket (fd 0) to get this information (and set
+    it to "unknown" on failure).
+
+-s <selector>
+    Specify selector (instead of reading it from stdin as usual).
+
+
 CONTENT
 
+
 All normal files (that don't begin with '.') and directories under the root
-dir are served and included in the menu. You can control menu generation by
-creating a file named ".gopher" in the directory in question.
+dir are served and included in the menu. When the name begins with '.',
+the file or directory is still served, but not included in the generated menu.
+".gopher" and ".gopher.rec" files aren't served directly.
+Files/directories not readable by all will not be served.
+
+You can control menu generation by creating a file named ".gopher" in the
+directory in question.
 
 Along the path, every directory is checked for the existence of a file called
 ".gopher.rec" (for recursive). If it exists, it's read the same way as a
@@ -53,8 +84,27 @@ menu file. It can't contain any menu items or info lines, otherwise things
 will break. However, you can set options perfectly well.
 
 A menu file is included in the menu before the directory listing, each line
-as an info line, unless the line begins with a special control character.
-These control characters can influence menu generation. They are:
+as an info line, unless the line begins with a special control character,
+or the line contains one or more tab characters.
+
+If the line contains tab characters, but no special control character at
+the beginning, it is interpreted as a gopher menu line:
+    info<TAB>selector<TAB>host<TAB>port
+
+If 'port' is skipped, but 'host' is specified, 70 is filled in as port.
+If both 'host' and 'port' is skipped, the line is considered 'local';
+configured server host and port are filled in.
+
+For local lines, if the selector doesn't begin with '/' or 'URL:', the
+current path is prepended. If the selector begins with '/', it is considered
+an absolute path (current path is not prepended, but the beginning '/' is
+cut off).
+
+If the info field is empty, but the selector is specified, the directory entry
+printing mechanism is invoked on the selector (unless it begins with 'URL:',
+in which case the info field is filled in by the URL itself).
+
+Special control characters (at the beginning of a line):
 
 #
     Lines beginning with # are ignored.
@@ -77,7 +127,7 @@ These control characters can influence menu generation. They are:
 
 `
     Works like ".", except the current path is prepended to the link.
-    (So this is more useful.)
+    (Useful for relative links.)
 
 !
     The rest of the line is interpreted as a special command.
@@ -96,6 +146,14 @@ These control characters can influence menu generation. They are:
     summary [length] - first LENGTH (default 72) printable characters are
                        appended after text files as a summarizing info line
 
+    dirproc <name> <command>
+        Register a directory processor, interpreting output as a control file.
+        (See below.)
+
+    dirproc-raw <name> <command>
+        Register a directory processor, passing output directly to the client.
+        (See below.)
+
     For example to list files by mtime in reverse order:
 
     !reverse
@@ -113,10 +171,6 @@ These control characters can influence menu generation. They are:
     altogether.
 
 
-When the request was made in gopher+ mode, the VIEWS+ block is autogenerated
-for user-specified links (guessing the content type from the first character of
-the link).
-
 The server generates html redirect pages for URL:<url> style requests (as
 the wikipedia article on gopher describes).
 
@@ -124,57 +178,52 @@ Files with the .g extension are included in the menu as menu files (type 1),
 with the .g removed from the description. When serving such a file, it's opened
 and processed as a control file.
 
-EXTERNAL PROCESSORS
 
-There are two kinds of external processor requests - when the request begins
-with '!', and when with a '@'. These serve as gateways to an external
-program that can use a search string to generate results.  You can define
-your processors in a file named ".search".
 
-Each row in the .search file is a TAB-separated record:
-name<TAB>executable<TAB>arg1<TAB>arg2...
+DIRECTORY PROCESSORS
 
-The first two items are mandatory. They define the name under one can invoke
-the program; and the executable that is started to handle the request.
-Further (optional) items in the record are passed on to the executable as
-arguments; then the search string (if any) is added as the final argument.
 
-With '!' requests, the external processor's output is unmanaged: it's passed
-directly to the client. This way, the processor is responsible for handling
-gopher+ requests too (this is indicated by adding another argument at the
-end, a single "$").
+You can use external programs for generating gopher content.
+These external programs can be specified using the "dirproc" and "dirproc-raw"
+special commands, which are to be put in .gopher.rec files.
 
-When the request begins with a '@', the output of the processor is
-interpreted as in the .gopher file format (and thus gopher+ requests are
-automatically handled).
+Explanation:
+ ".gopher" files are only read when the menu for that one specific directory is
+ requested, while ".gopher.rec" files are always read, from each directory from
+ the server root to the directory of the requested selector.
 
-As an example, we can create a processor to output the first N numbers.
-This program might look like this:
+ The dirproc commands establish "virtual selectors" under a directory; so to
+ get them processed, you can't put them in the .gopher file for that directory,
+ since that will only get read when that directory is directly requested in the
+ selector.
 
-#!/bin/bash
-echo "Hello $1!"
-for((n=1;n<=$2;n++)); do
-echo "$n"
-done
+When a directory processor is registered under a name, requests for that name,
+and everything below a directory of such name will result in running the
+specified command in the shell. The output of the command will either be
+processed as a control file (when registered by "dirproc"), or passed on
+to the client directly (when registered by "dirproc-raw").
 
-We'll save it in counter.sh (with chmod a+x). Then register it in .search:
+Dirproc registrations only have effect in the directory where the .gopher.rec
+file was processed (so they don't get inherited by subdirectories, like
+all other commands in .gopher.rec files do).
 
-counter	counter.sh	World
+The program run by the shell command will have access to some environment
+variables:
 
-Finally, create a link in .gopher:
+ QUERY
+  This will contain the section of the selected path starting with the
+  processor name. So if the processor was registered as "a/b/c/proc",
+  and the request was made for "a/b/c/proc/x", QUERY will be "proc/x".
 
-.7First N numbers	@counter
+ PEER
+  IP/name of the connected peer (might be "unknown").
 
-This way, if a user visits our site and clicks on the "First N numbers"
-link, they are presented with an input box. After entering "5", the output
-is:
+ SEARCH
+  When a search argument was received, this env will be set to that string.
 
-  Hello World!
-  1
-  2
-  3
-  4
-  5
+When executing the command, the current directory will be the directory
+where the processor was registered.
+
 
 HTTPGATE
 
@@ -185,12 +234,3 @@ To use it, copy httpgate.cfg.h.sample to httpgate.cfg.h, and edit it for
 configuration (such as the path to the mgod executable). Then compile httpgate
 ("make httpgate"). Finally, set up your web server to use the resulting file
 as a CGI.
-
-LICENSE
-
-GPL version 2.
-
-AUTHOR
-
-Mate Nagy <k-zed@hactar.net>
-
