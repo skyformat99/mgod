@@ -458,7 +458,7 @@ void printentry(char *e)
 			char **ft = filetypes;
 			char extwdot[8];
 
-			if(strlen(ext) > 7) {
+			if(strlen(ext) > 6) {
 				menuchar = '0';
 			} else {
 				strcpy(extwdot, ext);
