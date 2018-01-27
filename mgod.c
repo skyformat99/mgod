@@ -82,11 +82,12 @@ typedef  unsigned     char  u1;   /* unsigned 1-byte type */
 }
 
 /* The whole new hash function */
-u4 hash(k, length, initval)
-	register u1 *k;        /* the key */
+u4 hash(k_str, length, initval)
+	const char   *k_str;   /* the key */
 	u4           length;   /* the length of the key in bytes */
 	u4           initval;  /* the previous hash, or an arbitrary value */
 {
+	register const u1 *k = (const u1 *)k_str;
 	register u4 a,b,c;  /* the internal state */
 	u4          len;    /* how many key bytes still need mixing */
 
@@ -773,7 +774,7 @@ void dirlist()
 
 	/* generate directory listing */
 	if(genlist) {
-		n = scandir(".", &namelist, dirfilter, (int (*) (const void *, const void *) ) dirsort);
+		n = scandir(".", &namelist, dirfilter, dirsort);
 		if(n < 0) {
 			perror("scandir");
 			exit(1);
